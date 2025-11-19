@@ -30,6 +30,13 @@ for f in nginx.conf env.conf cert.crt cert.key protect.lua record.lua stats.lua;
   curl -L --retry 3 -o "/data/dk8sfw/$f" "https://github.com/stu2116Edward/Dk8sFirewall/raw/main/$f"
 done
 ````
+替换`/data/dk8sfws`目录下的ssl公私钥  
+修改`nginx.conf`将证书名称替换成自己的（nginx运行在容器内部所以是当前目录下的）  
+然后将域名修改成自己的  
+如果存在问题进入容器内部查看对应文件是否存在
+```
+docker exec -it dk8s-fw /bin/sh
+```
 
 运行项目
 ```

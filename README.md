@@ -1,4 +1,4 @@
-# Dk8sFirewall
+# Dk8sFirewall-Beta
 
 本项目是基于OpenResty实现的流控面板  
 源项目作者：https://github.com/yinyue123/DK8sDDosFirewall  
@@ -26,8 +26,8 @@ cd /data/dk8sfw
 
 下载配置文件
 ```
-for f in nginx.conf env.conf cert.crt cert.key protect.lua record.lua stats.lua; do
-  curl -L --retry 3 -o "/data/dk8sfw/$f" "https://github.com/stu2116Edward/Dk8sFirewall/raw/main/$f"
+for f in nginx.conf env.conf cert.crt cert.key protect.lua record.lua stats.lua persistence.lua save_data.lua view_data.lua; do
+  curl -L --retry 3 -o "/data/dk8sfw/$f" "https://github.com/stu2116Edward/Dk8sFirewall/raw/beta-branch/$f"
 done
 ````
 替换`/data/dk8sfws`目录下的ssl公私钥  

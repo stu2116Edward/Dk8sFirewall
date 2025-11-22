@@ -49,7 +49,7 @@ docker run -d \
 --cap-add=NET_RAW \
 --cap-add=SYS_ADMIN \
 -v /data/dk8sfw:/app:rw \
-stu2116edwardhu/dk8s-fw
+stu2116edwardhu/dk8s-fw:beta
 ```
 
 访问监控面板：https://example.com/dk8s.stats  

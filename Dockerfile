@@ -1,6 +1,6 @@
 # FROM openresty/openresty:1.21.4.2-alpine as builder
 # FROM openresty/openresty:1.27.1.2-alpine as builder
-FROM stu2116edwardhu/openresty:latest as builder
+FROM stu2116edwardhu/openresty:latest AS builder
 USER root
 RUN mkdir /app
 WORKDIR /app

@@ -1,131 +1,96 @@
 ngx.header.content_type = "text/html; charset=utf-8"
 
--- 获取当前访问者真实IP（优先 X-Forwarded-For 的第一个）
+-- Debug
+-- 检查URL参数 "ask" 是否为 "true"
+-- if ngx.var.arg_ask == "true" then
+--     -- -- 获取所有请求头
+--     -- local headers = ngx.req.get_headers()
+--     -- ngx.say("--- Detected ask=true, Printing All Request Headers ---")
+--     -- ngx.say("------------------------------------------------------")
+    
+--     -- -- 遍历并打印每一个请求头
+--     -- for key, value in pairs(headers) do
+--     --     -- 有些请求头可能有多个值，以table形式存在，这里做个兼容处理
+--     --     if type(value) == "table" then
+--     --         ngx.say(key .. ": " .. table.concat(value, ", "))
+--     --     else
+--     --         ngx.say(key .. ": " .. value)
+--     --     end
+--     -- end
+
+--     -- ===================================================================
+--     -- Part 1: 获取访客真实IP地址 (根据您的要求更新)
+--     -- 优先级: CF-Connecting-IP > EO-Connecting-IP > X-Forwarded-For > remote_addr
+--     -- ===================================================================
+--     local cf_ip = ngx.var.http_cf_connecting_ip
+--     local eo_ip = ngx.var.http_eo_connecting_ip -- Nginx 会自动将 'EO-Connecting-IP' 转为 'http_eo_connecting_ip'
+--     local xff = ngx.var.http_x_forwarded_for
+--     local current_visitor_ip
+--     if cf_ip and cf_ip ~= "" then
+--         current_visitor_ip = cf_ip
+--     elseif eo_ip and eo_ip ~= "" then
+--         current_visitor_ip = eo_ip
+--     elseif xff and xff ~= "" then
+--         -- 遍历 X-Forwarded-For 列表，获取最后一个非空的IP地址
+--         local ips = {}
+--         for ip in string.gmatch(xff, "([^, ]+)") do
+--             table.insert(ips, ip)
+--         end
+--         if #ips > 0 then
+--             current_visitor_ip = ips[#ips]
+--         else
+--             current_visitor_ip = ngx.var.remote_addr -- 如果 XFF 格式异常，则降级
+--         end
+--     else
+--         -- 如果以上所有头都不存在，则使用直接连接的IP
+--         current_visitor_ip = ngx.var.remote_addr
+--     end
+
+--     ngx.say("CF-Connecting-IP: ", cf_ip)
+--     ngx.say("EO-Connecting-IP: ", eo_ip)
+--     ngx.say("X-Forwarded-For: ", xff)
+--     ngx.say("Current Visitor IP: ", current_visitor_ip)
+    
+--     ngx.say("--- All IPs in X-Forwarded-For ---")
+--     if xff and xff ~= "" then
+--         for ip in string.gmatch(xff, "([^, ]+)") do
+--             ngx.say(ip)
+--         end
+--     else
+--         ngx.say("X-Forwarded-For is empty or not present.")
+--     end
+    
+--     ngx.say("------------------------------------------------------")
+--     -- 打印完毕，正常退出，不再执行后面的统计代码
+--     return ngx.exit(ngx.OK)
+-- end
+
+-- ======================================================
+-- [[ 您原有的 stats.lua 代码从这里开始 ]]
+-- ======================================================
+
+
+-- status.lua (最终优化版 - 已确认能处理重复IP)
+
+-- 获取当前访问者的真实 IP 地址
 local xff = ngx.var.http_x_forwarded_for
 local current_visitor_ip
 if xff and xff ~= "" then
-    local ip = xff:match("([^,%s]+)")
-    current_visitor_ip = ip or ngx.var.remote_addr
+    -- 遍历 X-Forwarded-For 列表，获取最后一个非空的IP地址
+    local ips = {}
+    for ip in string.gmatch(xff, "([^, ]+)") do
+        table.insert(ips, ip)
+    end
+    if #ips > 0 then
+        current_visitor_ip = ips[#ips]
+    else
+        current_visitor_ip = ngx.var.remote_addr -- 如果 XFF 格式异常，则降级
+    end
 else
     current_visitor_ip = ngx.var.remote_addr
 end
 
-local dict = ngx.shared.traffic_stats
-
--- 记录当前IP入站时间戳，只要访问到服务器就记录
-do
-    local first_key = "first:hour:" .. current_visitor_ip
-    local first_time = dict:get(first_key)
-    if not first_time or first_time == 0 then
-        dict:set(first_key, os.time(), 86400)
-    end
-end
-
--- 日志记录函数
-local function ensure_log_directory()
-    local log_dir = "log"
-    local test_path = log_dir .. "/.dir_test__"
-    local f = io.open(test_path, "w")
-    if f then
-        f:close()
-        os.remove(test_path)
-        return
-    end
-    local dir_sep = package.config:sub(1,1)
-    if dir_sep == "\\" then
-        os.execute("mkdir \"" .. log_dir .. "\" >nul 2>nul")
-    else
-        os.execute("mkdir -p '" .. log_dir .. "' >/dev/null 2>&1")
-    end
-end
-
-local function get_today_log_filename()
-    local now = os.time()
-    local today = os.date("*t", now)
-    return string.format("%04d%02d%02d.csv", today.year, today.month, today.day)
-end
-
-local function format_ts(ts)
-    if not ts or ts == 0 then return "-" end
-    local t = os.date("*t", ts)
-    return string.format("%d-%d-%d %02d:%02d:%02d", t.year, t.month, t.day, t.hour, t.min, t.sec)
-end
-
-local function is_ip_banned(ip)
-    local banned_mem = ngx.shared.banned_ips or dict
-    if dict:get("forbidden:hour:" .. ip) == true then return true end
-    if dict:get("forbidden:day:" .. ip) == true then return true end
-    if banned_mem:get("banned:" .. ip) == true then return true end
-    return false
-end
-
-local function record_ip_log(ip)
-    ensure_log_directory()
-    local log_filename = "log/" .. get_today_log_filename()
-    local first_key = "first:hour:" .. ip
-    local first_visit = dict:get(first_key)
-    if not first_visit then
-        first_visit = os.time()
-        dict:set(first_key, first_visit, 86400)
-    end
-    local banned_status = is_ip_banned(ip) and "true" or "false"
-    local function csv_escape(v)
-        v = tostring(v or "")
-        v = v:gsub('"', '""')
-        return '"' .. v .. '"'
-    end
-    local log_entry = table.concat({
-        csv_escape(ip),
-        csv_escape(format_ts(first_visit)),
-        csv_escape(banned_status)
-    }, ",") .. "\n"
-
-    local offset_key = "log_offset:" .. ip
-    local last_status_key = "last_ban_status:" .. ip
-    local file_offset = dict:get(offset_key)
-    local last_status = dict:get(last_status_key)
-    if file_offset and last_status ~= nil then
-        if last_status ~= banned_status then
-            local file = io.open(log_filename, "r+")
-            if file then
-                file:seek("set", file_offset)
-                local line = file:read("*l")
-                if line and line ~= "" then
-                    local last_comma = line:match(".*(),")
-                    if last_comma then
-                        local new_line = line:sub(1, last_comma) .. banned_status
-                        if #new_line < #line then
-                            new_line = new_line .. string.rep(" ", #line - #new_line)
-                        end
-                        file:seek("set", file_offset)
-                        file:write(new_line .. "\n")
-                    end
-                end
-                file:close()
-                dict:set(last_status_key, banned_status, 86400)
-            end
-        end
-        return
-    end
-
-    local file = io.open(log_filename, "a+")
-    if file then
-        local file_size = file:seek("end")
-        if file_size == 0 then
-            file:write("\239\187\191")
-            file:write("IP,入站时间戳,是否被封禁\n")
-        end
-        local offset = file:seek("end")
-        file:write(log_entry)
-        file:close()
-        dict:set(offset_key, offset, 86400)
-        dict:set(last_status_key, banned_status, 86400)
-    end
-end
-
--- 确保页面访问也会记录到日志文件
-record_ip_log(current_visitor_ip)
-
+-- 字节转换
 local function human_bytes(n)
     if not n then return "0 B" end
     if n < 1024 then return string.format("%d B", n) end
@@ -133,11 +98,14 @@ local function human_bytes(n)
     if n < 1024 * 1024 * 1024 then return string.format("%.2f MB", n / (1024 * 1024)) end
     return string.format("%.2f GB", n / (1024 * 1024 * 1024))
 end
+
+-- 耗时转换
 local function human_duration(us)
     if not us then return "0 μs" end
     return string.format("%d μs", us)
 end
 
+-- 获取限制阈值
 local function get_limits(during)
     if during == "hour" then
         return {
@@ -145,7 +113,7 @@ local function get_limits(during)
             bytes = ngx.var.limit_bytes_per_hour,
             costs_us = tonumber(ngx.var.limit_costs_per_hour) * 1000
         }
-    else
+    else -- day
         return {
             count = ngx.var.limit_count_per_day,
             bytes = ngx.var.limit_bytes_per_day,
@@ -154,85 +122,67 @@ local function get_limits(during)
     end
 end
 
-local function get_ip_first_time(ip)
-    local first_time = dict:get("first:hour:"..ip)
-    if not first_time or first_time == 0 then
-        first_time = dict:get("first:day:"..ip)
-    end
-    if not first_time or first_time == 0 then
-        return "-"
-    end
-    return format_ts(first_time)
-end
-
--- 判断某个时间戳是否为今天
-local function is_today(ts)
-    if not ts or ts == 0 then return false end
-    local t = os.date("*t", ts)
-    local now = os.date("*t", os.time())
-    return t.year == now.year and t.month == now.month and t.day == now.day
-end
-
+-- 生成表格行
 local function generate_table_rows(visitor_ip)
     local rows = ""
     local timestamp = ngx.now()
+    local dict = ngx.shared.traffic_stats
+    
     local function stats(during)
         local limits = get_limits(during)
         local bytes_limit_human = human_bytes(tonumber(limits.bytes))
         local costs_limit_human = human_duration(limits.costs_us)
+        
         local keys = dict:get_keys(0)
         for _, val in pairs(keys) do
             local match = "last:"..during
             if val:sub(1, #match) == match then
                 local ip = val:sub(#match + 2)
-                local first_time_key = "first:hour:" .. ip
-                local first_time_raw = dict:get(first_time_key)
-                -- 只显示当天入站的 IP
-                if is_today(first_time_raw) then
-                    local first_time_str = get_ip_first_time(ip)
-                    local last_time = dict:get(val)
-                    local count = dict:get("count:"..during..":"..ip)
-                    local bytes = dict:get("bytes:"..during..":"..ip)
-                    local costs_us = dict:get("costs:"..during..":"..ip)
-                    local forbidden = dict:get("forbidden:"..during..":"..ip)
-                    if last_time and count and bytes and costs_us then
-                        local age = math.floor(timestamp - (tonumber(last_time) or timestamp))
-                        local bytes_human = human_bytes(tonumber(bytes))
-                        local costs_human = human_duration(tonumber(costs_us))
-                        local forbidden_str = tostring(forbidden or false)
-                        local row_style = ""
-                        if forbidden == true and ip == visitor_ip then
-                            row_style = "style='background-color: #ffe6e6; font-weight: bold;'"
-                        elseif forbidden == true then
-                            row_style = "style='background-color: #ffe6e6;'"
-                        elseif ip == visitor_ip then
-                            row_style = "style='background-color: #d4edda; font-weight: bold;'"
-                        end
-                        rows = rows .. string.format([[
-                            <tr %s>
-                                <td class="ip-cell">%s</td>
-                                <td>%s</td>
-                                <td>%d</td>
-                                <td>%s</td>
-                                <td>%d/%s</td>
-                                <td>%s/%s</td>
-                                <td>%s/%s</td>
-                                <td>%s</td>
-                            </tr>
-                        ]],
-                        row_style,
-                        ip,
-                        during, age, first_time_str,
-                        tonumber(count), limits.count,
-                        bytes_human, bytes_limit_human,
-                        costs_human, costs_limit_human,
-                        forbidden_str
-                        )
+                
+                -- 批量获取数据，减少竞态条件窗口
+                local last_time = dict:get(val)
+                local count = dict:get("count:"..during..":"..ip)
+                local bytes = dict:get("bytes:"..during..":"..ip)
+                local costs_us = dict:get("costs:"..during..":"..ip)
+                local forbidden = dict:get("forbidden:"..during..":"..ip)
+
+                -- 增加nil检查，如果数据在中途被删除，则跳过此条记录
+                if last_time and count and bytes and costs_us then
+                    local age = math.floor(timestamp - (tonumber(last_time) or timestamp))
+                    local bytes_human = human_bytes(tonumber(bytes))
+                    local costs_human = human_duration(tonumber(costs_us))
+                    local forbidden_str = tostring(forbidden or false)
+
+                    local row_style = ""
+                    if ip == visitor_ip then
+                        row_style = "style='background-color: #d4edda; font-weight: bold;'"
                     end
+                    
+                    rows = rows .. string.format([[
+                        <tr %s>
+                            <td class="ip-cell">%s</td>
+                            <td>%s</td>
+                            <td>%d</td>
+                            <td>%d/%s</td>
+                            <td>%s/%s</td>
+                            <td>%s/%s</td>
+                            <td>%s</td>
+                            <td class="location-cell" data-ip="%s"></td>
+                        </tr>
+                    ]], 
+                    row_style,
+                    ip, during, age, 
+                    tonumber(count), limits.count, 
+                    bytes_human, bytes_limit_human, 
+                    costs_human, costs_limit_human, 
+                    forbidden_str,
+                    ip
+                    )
                 end
             end
         end
     end
+    
     stats("hour")
     stats("day")
     return rows
@@ -240,124 +190,553 @@ end
 
 local request_type = ngx.var.arg_type or "page"
 
-if request_type == "export" then
-    -- 直接读取当天日志文件内容返回
-    local filename = get_today_log_filename()
-    local log_filename = "log/" .. filename
-    local file = io.open(log_filename, "rb")
-    if file then
-        local content = file:read("*a")
-        file:close()
-        ngx.header.content_type = "text/csv; charset=utf-8"
-        ngx.header.content_disposition = string.format('attachment; filename="%s"', filename)
-        ngx.say(content)
-    else
-        ngx.header.content_type = "text/csv; charset=utf-8"
-        ngx.header.content_disposition = string.format('attachment; filename="%s"', filename)
-        ngx.say("\239\187\191IP,入站时间戳,是否被封禁\n")
+if request_type == "json" then
+    -- JSON API 接口
+    ngx.header.content_type = "application/json; charset=utf-8"
+    
+    local timestamp = ngx.now()
+    local dict = ngx.shared.traffic_stats
+    local data = {
+        current_ip = current_visitor_ip,
+        timestamp = timestamp,
+        update_time = os.date("%Y-%m-%d %H:%M:%S"),
+        stats = {}
+    }
+    
+    local function get_stats_data(during)
+        local limits = get_limits(during)
+        local stats_data = {}
+        local keys = dict:get_keys(0)
+        
+        for _, val in pairs(keys) do
+            local match = "last:"..during
+            if val:sub(1, #match) == match then
+                local ip = val:sub(#match + 2)
+                
+                local last_time = dict:get(val)
+                local count = dict:get("count:"..during..":"..ip)
+                local bytes = dict:get("bytes:"..during..":"..ip)
+                local costs_us = dict:get("costs:"..during..":"..ip)
+                local forbidden = dict:get("forbidden:"..during..":"..ip)
+
+                if last_time and count and bytes and costs_us then
+                    local age = math.floor(timestamp - (tonumber(last_time) or timestamp))
+                    
+                    table.insert(stats_data, {
+                        ip = ip,
+                        period = during,
+                        age = age,
+                        count = tonumber(count),
+                        count_limit = tonumber(limits.count),
+                        bytes = tonumber(bytes),
+                        bytes_limit = tonumber(limits.bytes),
+                        bytes_human = human_bytes(tonumber(bytes)),
+                        bytes_limit_human = human_bytes(tonumber(limits.bytes)),
+                        costs_us = tonumber(costs_us),
+                        costs_limit_us = limits.costs_us,
+                        costs_human = human_duration(tonumber(costs_us)),
+                        costs_limit_human = human_duration(limits.costs_us),
+                        forbidden = tostring(forbidden or false),
+                        is_current = (ip == current_visitor_ip)
+                    })
+                end
+            end
+        end
+        
+        return stats_data
     end
-    return
+    
+    -- 合并小时和天的数据
+    local hour_stats = get_stats_data("hour")
+    local day_stats = get_stats_data("day")
+    
+    for _, stat in ipairs(hour_stats) do
+        table.insert(data.stats, stat)
+    end
+    for _, stat in ipairs(day_stats) do
+        table.insert(data.stats, stat)
+    end
+    
+    ngx.say(require("cjson").encode(data))
+    
 elseif request_type == "data" then
-    ngx.header.content_type = "application/json"
-    ngx.say(string.format([[{"current_ip":"%s","table_html":"%s"}]],
-        current_visitor_ip,
-        ngx.escape_uri(generate_table_rows(current_visitor_ip))))
+    -- 保持向后兼容的HTML数据接口
+    ngx.say(generate_table_rows(current_visitor_ip))
 else
+    -- 新的客户端渲染页面
     ngx.say([[
+    <!DOCTYPE html>
     <html>
     <head>
-    <title>IP 限制与使用统计</title>
+    <title>IP 限制与使用统计 (含归属地)</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: sans-serif; }
-        table { border-collapse: collapse; font-family: monospace; font-size: 14px; margin: 20px auto; width: 90%; max-width: 1600px; }
-        th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: center; }
-        th { background: #f5f5f5; font-weight: bold; }
-        .header-info { text-align: center; margin: 10px auto; }
-        .update-time { text-align: center; margin-top: 10px; color: #666; font-size: 12px; }
-        .export-btn { display:inline-block; margin-top:8px; padding:6px 12px; background:#007bff; color:#fff; border-radius:4px; cursor:pointer; font-size:13px; }
-        .export-btn:disabled { background:#999; cursor:not-allowed; }
-        .view-mode-select { display:inline-block; margin-left:15px; padding:6px 10px; font-size:13px; border:1px solid #ccc; border-radius:4px; background:#fff; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 1800px; margin: 0 auto; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; }
+        .header h1 { margin: 0; font-size: 24px; }
+        .current-ip { margin: 10px 0 0 0; font-size: 16px; opacity: 0.9; }
+        .controls { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #e9ecef; display: flex; justify-content: space-between; align-items: center; }
+        .stats-table { width: 100%; border-collapse: collapse; }
+        .stats-table th { background: #f8f9fa; padding: 12px 15px; text-align: left; font-weight: 600; color: #495057; border-bottom: 2px solid #dee2e6; }
+        .stats-table td { padding: 10px 15px; border-bottom: 1px solid #dee2e6; }
+        .stats-table tr:hover { background: #f8f9fa; }
+        .stats-table tr.current-ip-row { background: #d4edda !important; font-weight: 600; }
+        .ip-cell { font-family: 'Monaco', 'Menlo', monospace; font-weight: 600; }
+        .location-cell { min-width: 200px; color: #007bff; }
+        .progress { background: #e9ecef; border-radius: 4px; height: 6px; overflow: hidden; margin: 5px 0; }
+        .progress-bar { background: #28a745; height: 100%; transition: width 0.3s ease; }
+        .progress-bar.warning { background: #ffc107; }
+        .progress-bar.danger { background: #dc3545; }
+        .btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-primary:hover { background: #0056b3; }
+        .btn-success { background: #28a745; color: white; }
+        .btn-success:hover { background: #218838; }
+        .btn-info { background: #17a2b8; color: white; }
+        .btn-info:hover { background: #138496; }
+        .update-info { color: #6c757d; font-size: 14px; }
+        .loading { text-align: center; padding: 40px; color: #6c757d; }
+        .error { background: #f8d7da; color: #721c24; padding: 15px; border-radius: 4px; margin: 10px 0; }
+        .search-box { padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; width: 250px; }
+        .refresh-controls { display: flex; align-items: center; gap: 10px; }
+        .interval-select { padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; background: white; font-size: 14px; }
+        .interval-select:focus { outline: none; border-color: #007bff; }
     </style>
-    <script>
-        function fetchAndUpdate() {
-            fetch('/dk8s.stats?type=data&t=' + Date.now())
-                .then(r => r.json())
-                .then(data => {
-                    document.getElementById('current-ip').textContent = data.current_ip;
-                    document.getElementById('stats-body').innerHTML = decodeURIComponent(data.table_html);
-                    document.getElementById('last-update').textContent = new Date().toLocaleString();
-                    updateViewMode();
-                });
-        }
-        function manualExport() {
-            const url = '/dk8s.stats?type=export&t=' + Date.now();
-            const btn = document.getElementById('export-btn');
-            if (btn) {
-                btn.disabled = true;
-                const oldText = btn.textContent;
-                btn.textContent = '准备下载...';
-                setTimeout(() => {
-                    btn.disabled = false;
-                    btn.textContent = oldText;
-                }, 1500);
-            }
-            const a = document.createElement('a');
-            a.href = url;
-            a.style.display = 'none';
-            document.body.appendChild(a);
-            a.click();
-            setTimeout(() => document.body.removeChild(a), 2000);
-        }
-        function updateViewMode() {
-            const sel = document.getElementById('view-mode');
-            const mode = sel ? sel.value : 'hour';
-            const rows = document.querySelectorAll('#stats-body tr');
-            rows.forEach(row => {
-                const periodCell = row.querySelector('td:nth-child(2)');
-                const period = periodCell ? periodCell.textContent.trim() : '';
-                if (mode === 'hour') {
-                    row.style.display = (period === 'hour') ? '' : 'none';
-                } else if (mode === 'day') {
-                    row.style.display = (period === 'day') ? '' : 'none';
-                } else {
-                    row.style.display = '';
-                }
-            });
-        }
-        document.addEventListener('DOMContentLoaded', () => { fetchAndUpdate(); updateViewMode(); });
-        setInterval(fetchAndUpdate, 500);
-    </script>
     </head>
     <body>
-        <div class="header-info">
-            <h3>Your Current IP: <span id="current-ip" style="color: #007bff;"></span></h3>
-            <button id="export-btn" class="export-btn" onclick="manualExport()">导出当日IP统计CSV</button>
-            <select id="view-mode" class="view-mode-select" onchange="updateViewMode()">
-                <option value="hour" selected>仅显示 hour</option>
-                <option value="day">仅显示 day</option>
-                <option value="all">显示所有</option>
-            </select>
+        <div class="container">
+            <div class="header">
+                <h1>📊 IP 限制与使用统计</h1>
+                <div class="current-ip">您的IP: <strong id="current-ip">加载中...</strong></div>
+            </div>
+            
+            <div class="controls">
+                <div class="refresh-controls">
+                    <input type="text" id="search-box" class="search-box" placeholder="搜索IP地址..." onkeyup="filterTable()">
+                    <select id="period-filter" class="interval-select" onchange="changePeriodFilter()">
+                        <option value="all">全部周期</option>
+                        <option value="hour" selected>小时统计</option>
+                        <option value="day">天统计</option>
+                    </select>
+                    <button class="btn btn-primary" onclick="refreshData()">🔄 刷新数据</button>
+                    <button class="btn btn-success" onclick="toggleAutoRefresh()" id="auto-refresh-btn">⏰ 开启自动刷新</button>
+                    <select id="refresh-interval" class="interval-select" onchange="changeRefreshInterval()">
+                        <option value="500">500ms</option>
+                        <option value="1000" selected>1000ms</option>
+                        <option value="2000">2000ms</option>
+                        <option value="3000">3000ms</option>
+                        <option value="5000">5000ms</option>
+                    </select>
+                </div>
+                <div class="update-info">
+                    最后更新: <span id="last-update">--</span>
+                </div>
+            </div>
+            
+            <div id="loading" class="loading">
+                <div>📡 加载数据中...</div>
+            </div>
+            
+            <div id="error-message" class="error" style="display: none;"></div>
+            
+            <div id="table-container" style="display: none;">
+                <table class="stats-table">
+                    <thead>
+                        <tr>
+                            <th>IP地址</th>
+                            <th>周期</th>
+                            <th>活跃时间</th>
+                            <th>请求数</th>
+                            <th>流量使用</th>
+                            <th>耗时</th>
+                            <th>封禁状态</th>
+                            <th>归属地</th>
+                        </tr>
+                    </thead>
+                    <tbody id="stats-body">
+                    </tbody>
+                </table>
+            </div>
         </div>
-        <table>
-            <thead>
-                <tr>
-                    <th>IP</th>
-                    <th>周期</th>
-                    <th>活跃时间(秒)</th>
-                    <th>入站时间</th>
-                    <th>请求数(当前/限制)</th>
-                    <th>流量(当前/限制)</th>
-                    <th>耗时(当前/限制)</th>
-                    <th>是否封禁</th>
-                </tr>
-            </thead>
-            <tbody id="stats-body">
-            </tbody>
-        </table>
-        <div class="update-time">
-            最后更新: <span id="last-update">]] .. os.date("%Y-%m-%d %H:%M:%S") .. [[</span>
-        </div>
-        <div style="text-align:center;margin-top:8px;color:#666;font-size:13px;">仅显示当天入站的IP数据</div>
+
+        <script>
+            let autoRefreshInterval = null;
+            const ipLocationCache = {};
+            let ipRequestQueue = [];
+            let isProcessingQueue = false;
+            let allStatsData = [];
+            let currentSearchTerm = '';
+            let currentPeriodFilter = 'hour'; // 默认筛选小时统计
+
+            // 格式化字节大小
+            function formatBytes(bytes) {
+                if (!bytes) return '0 B';
+                const k = 1024;
+                const sizes = ['B', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            }
+
+            // 格式化时间
+            function formatDuration(seconds) {
+                if (!seconds) return '0秒';
+                if (seconds < 60) return seconds + '秒';
+                if (seconds < 3600) return Math.floor(seconds / 60) + '分钟';
+                return Math.floor(seconds / 3600) + '小时';
+            }
+
+            // 获取进度条颜色类
+            function getProgressClass(percentage) {
+                if (percentage < 50) return '';
+                if (percentage < 80) return 'warning';
+                return 'danger';
+            }
+
+            // 创建表格行
+            function createTableRow(stat) {
+                const countPercentage = Math.min((stat.count / stat.count_limit) * 100, 100);
+                const bytesPercentage = Math.min((stat.bytes / stat.bytes_limit) * 100, 100);
+                const costsPercentage = Math.min((stat.costs_us / stat.costs_limit_us) * 100, 100);
+                
+                const row = document.createElement('tr');
+                if (stat.is_current) {
+                    row.className = 'current-ip-row';
+                }
+                
+                row.innerHTML = `
+                    <td class="ip-cell">${stat.ip}</td>
+                    <td>${stat.period === 'hour' ? '小时' : '天'}</td>
+                    <td>${formatDuration(stat.age)}</td>
+                    <td>
+                        ${stat.count}/${stat.count_limit}
+                        <div class="progress">
+                            <div class="progress-bar ${getProgressClass(countPercentage)}" style="width: ${countPercentage}%"></div>
+                        </div>
+                    </td>
+                    <td>
+                        ${stat.bytes_human}/${stat.bytes_limit_human}
+                        <div class="progress">
+                            <div class="progress-bar ${getProgressClass(bytesPercentage)}" style="width: ${bytesPercentage}%"></div>
+                        </div>
+                    </td>
+                    <td>
+                        ${stat.costs_human}/${stat.costs_limit_human}
+                        <div class="progress">
+                            <div class="progress-bar ${getProgressClass(costsPercentage)}" style="width: ${costsPercentage}%"></div>
+                        </div>
+                    </td>
+                    <td>${stat.forbidden === 'true' ? '🔴 是' : '🟢 否'}</td>
+                    <td class="location-cell" data-ip="${stat.ip}">查询中...</td>
+                `;
+                
+                return row;
+            }
+
+            // 平滑更新表格 - 只更新数字，保持DOM结构稳定
+            function smoothUpdateTable(newStats) {
+                // 更新全局数据
+                allStatsData = newStats;
+                const tbody = document.getElementById('stats-body');
+                const existingRows = Array.from(tbody.querySelectorAll('tr'));
+                const newRowsMap = new Map();
+                
+                // 创建新行的映射
+                newStats.forEach(stat => {
+                    const rowId = `${stat.ip}-${stat.period}`;
+                    newRowsMap.set(rowId, stat);
+                });
+                
+                // 创建现有行的映射
+                const existingRowsMap = new Map();
+                existingRows.forEach(row => {
+                    const ipCell = row.querySelector('.ip-cell');
+                    const periodCell = row.cells[1];
+                    if (ipCell && periodCell) {
+                        const rowId = `${ipCell.textContent}-${periodCell.textContent}`;
+                        existingRowsMap.set(rowId, row);
+                    }
+                });
+                
+                // 首先更新所有现有行
+                existingRowsMap.forEach((row, rowId) => {
+                    const newStat = newRowsMap.get(rowId);
+                    if (newStat) {
+                        // 更新现有行数据
+                        updateTableRowNumbers(row, newStat);
+                        newRowsMap.delete(rowId);
+                    } else {
+                        // 删除不存在的行
+                        row.remove();
+                    }
+                });
+                
+                // 然后添加新行（只添加真正新的行）
+                newRowsMap.forEach((stat, rowId) => {
+                    if (!existingRowsMap.has(rowId)) {
+                        const newRow = createTableRow(stat);
+                        tbody.appendChild(newRow);
+                    }
+                });
+                
+                updateIPLocations();
+            }
+
+            // 只更新表格行的数字内容，保持DOM结构稳定
+            function updateTableRowNumbers(row, stat) {
+                const countPercentage = Math.min((stat.count / stat.count_limit) * 100, 100);
+                const bytesPercentage = Math.min((stat.bytes / stat.bytes_limit) * 100, 100);
+                const costsPercentage = Math.min((stat.costs_us / stat.costs_limit_us) * 100, 100);
+                
+                // 只更新文本内容，不重新创建DOM元素
+                const cells = row.cells;
+                
+                // 活跃时间（第3列）
+                if (cells[2].textContent !== formatDuration(stat.age)) {
+                    cells[2].textContent = formatDuration(stat.age);
+                }
+                
+                // 请求数（第4列）- 只更新文本部分，保持进度条DOM
+                const countText = cells[3].firstChild;
+                if (countText && countText.textContent !== `${stat.count}/${stat.count_limit}`) {
+                    countText.textContent = `${stat.count}/${stat.count_limit}`;
+                    const progressBar = cells[3].querySelector('.progress-bar');
+                    if (progressBar) {
+                        progressBar.style.width = `${countPercentage}%`;
+                        progressBar.className = `progress-bar ${getProgressClass(countPercentage)}`;
+                    }
+                }
+                
+                // 流量使用（第5列）- 只更新文本部分，保持进度条DOM
+                const bytesText = cells[4].firstChild;
+                if (bytesText && bytesText.textContent !== `${stat.bytes_human}/${stat.bytes_limit_human}`) {
+                    bytesText.textContent = `${stat.bytes_human}/${stat.bytes_limit_human}`;
+                    const progressBar = cells[4].querySelector('.progress-bar');
+                    if (progressBar) {
+                        progressBar.style.width = `${bytesPercentage}%`;
+                        progressBar.className = `progress-bar ${getProgressClass(bytesPercentage)}`;
+                    }
+                }
+                
+                // 耗时（第6列）- 只更新文本部分，保持进度条DOM
+                const costsText = cells[5].firstChild;
+                if (costsText && costsText.textContent !== `${stat.costs_human}/${stat.costs_limit_human}`) {
+                    costsText.textContent = `${stat.costs_human}/${stat.costs_limit_human}`;
+                    const progressBar = cells[5].querySelector('.progress-bar');
+                    if (progressBar) {
+                        progressBar.style.width = `${costsPercentage}%`;
+                        progressBar.className = `progress-bar ${getProgressClass(costsPercentage)}`;
+                    }
+                }
+                
+                // 封禁状态（第7列）
+                const newForbiddenText = stat.forbidden === 'true' ? '🔴 是' : '🟢 否';
+                if (cells[6].textContent !== newForbiddenText) {
+                    cells[6].textContent = newForbiddenText;
+                }
+                
+                // 更新当前IP高亮
+                if (stat.is_current) {
+                    row.className = 'current-ip-row';
+                } else {
+                    row.className = '';
+                }
+            }
+
+            // 改变周期筛选
+            function changePeriodFilter() {
+                const periodSelect = document.getElementById('period-filter');
+                currentPeriodFilter = periodSelect.value;
+                applyFilters();
+            }
+
+            // 应用所有筛选条件
+            function applyFilters() {
+                let filteredStats = allStatsData;
+                
+                // 应用周期筛选
+                if (currentPeriodFilter !== 'all') {
+                    filteredStats = filteredStats.filter(stat => 
+                        stat.period === currentPeriodFilter
+                    );
+                }
+                
+                // 应用搜索筛选
+                if (currentSearchTerm) {
+                    filteredStats = filteredStats.filter(stat => 
+                        stat.ip.toLowerCase().includes(currentSearchTerm)
+                    );
+                }
+                
+                const tbody = document.getElementById('stats-body');
+                tbody.innerHTML = '';
+                
+                filteredStats.forEach(stat => {
+                    const row = createTableRow(stat);
+                    tbody.appendChild(row);
+                });
+                
+                updateIPLocations();
+            }
+
+            // 过滤表格
+            function filterTable() {
+                currentSearchTerm = document.getElementById('search-box').value.toLowerCase();
+                applyFilters();
+            }
+
+            // 更新IP归属地
+            function updateIPLocations() {
+                document.querySelectorAll('.location-cell').forEach(cell => {
+                    const ip = cell.dataset.ip;
+                    if (!ip) return;
+                    
+                    if (ipLocationCache[ip]) {
+                        cell.textContent = ipLocationCache[ip];
+                    } else {
+                        cell.textContent = '查询中...';
+                        if (!ipRequestQueue.includes(ip)) {
+                            ipRequestQueue.push(ip);
+                        }
+                    }
+                });
+
+                if (!isProcessingQueue && ipRequestQueue.length > 0) {
+                    processIpQueue();
+                }
+            }
+
+            // 处理IP队列
+            function processIpQueue() {
+                if (ipRequestQueue.length === 0) {
+                    isProcessingQueue = false;
+                    return;
+                }
+                isProcessingQueue = true;
+                
+                const ip = ipRequestQueue.shift();
+                
+                fetch(`https://api.vore.top/api/IPdata?ip=${ip}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        let location = '查询失败';
+                        if (data && data.ipdata && data.ipdata.info1) {
+                            location = `${data.ipdata.info1} ${data.ipdata.info2 || ''} ${data.ipdata.info3 || ''}`.trim();
+                        }
+                        ipLocationCache[ip] = location;
+                        document.querySelectorAll(`.location-cell[data-ip="${ip}"]`).forEach(c => {
+                            c.textContent = location;
+                        });
+                    })
+                    .catch(error => {
+                        console.error('Error fetching IP location for', ip, error);
+                        ipLocationCache[ip] = '查询出错';
+                        document.querySelectorAll(`.location-cell[data-ip="${ip}"]`).forEach(c => {
+                            c.textContent = '查询出错';
+                        });
+                    })
+                    .finally(() => {
+                        setTimeout(processIpQueue, 1000);
+                    });
+            }
+
+            // 获取数据
+            async function fetchData() {
+                try {
+                    const response = await fetch('/dk8s.stats?type=json&t=' + Date.now());
+                    if (!response.ok) throw new Error('网络请求失败');
+                    
+                    const data = await response.json();
+                    
+                    document.getElementById('current-ip').textContent = data.current_ip;
+                    document.getElementById('last-update').textContent = data.update_time;
+                    
+                    // 隐藏加载状态（如果存在）
+                    const loadingEl = document.getElementById('loading');
+                    if (loadingEl && loadingEl.style.display !== 'none') {
+                        loadingEl.style.display = 'none';
+                        document.getElementById('table-container').style.display = 'block';
+                    }
+                    
+                    // 更新全局数据
+                    allStatsData = data.stats;
+                    
+                    // 应用所有筛选条件
+                    applyFilters();
+                    
+                } catch (error) {
+                    console.error('数据加载失败:', error);
+                    // 只在首次加载时显示错误
+                    const loadingEl = document.getElementById('loading');
+                    if (loadingEl && loadingEl.style.display !== 'none') {
+                        document.getElementById('loading').style.display = 'none';
+                        document.getElementById('error-message').style.display = 'block';
+                        document.getElementById('error-message').textContent = '❌ 加载数据失败: ' + error.message;
+                    }
+                }
+            }
+
+            // 刷新数据
+            function refreshData() {
+                // 显示刷新状态
+                const lastUpdate = document.getElementById('last-update');
+                const originalText = lastUpdate.textContent;
+                lastUpdate.textContent = '刷新中...';
+                lastUpdate.style.color = '#007bff';
+                
+                fetchData().finally(() => {
+                    setTimeout(() => {
+                        lastUpdate.style.color = '#6c757d';
+                    }, 1000);
+                });
+            }
+
+            // 切换自动刷新
+            function toggleAutoRefresh() {
+                const btn = document.getElementById('auto-refresh-btn');
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                    btn.textContent = '⏰ 开启自动刷新';
+                    btn.classList.remove('btn-success');
+                    btn.classList.add('btn-primary');
+                } else {
+                    const interval = parseInt(document.getElementById('refresh-interval').value);
+                    autoRefreshInterval = setInterval(fetchData, interval);
+                    btn.textContent = '⏹️ 停止自动刷新';
+                    btn.classList.remove('btn-primary');
+                    btn.classList.add('btn-success');
+                }
+            }
+
+            // 改变刷新间隔
+            function changeRefreshInterval() {
+                const interval = parseInt(document.getElementById('refresh-interval').value);
+                
+                // 如果自动刷新正在运行，重新设置定时器
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = setInterval(fetchData, interval);
+                    
+                    // 显示间隔更改提示
+                    const lastUpdate = document.getElementById('last-update');
+                    const originalText = lastUpdate.textContent;
+                    lastUpdate.textContent = `刷新间隔: ${interval}ms`;
+                    lastUpdate.style.color = '#17a2b8';
+                    
+                    setTimeout(() => {
+                        lastUpdate.textContent = originalText;
+                        lastUpdate.style.color = '#6c757d';
+                    }, 1500);
+                }
+            }
+
+            // 初始化
+            document.addEventListener('DOMContentLoaded', function() {
+                fetchData();
+            });
+        </script>
     </body>
     </html>
     ]])
